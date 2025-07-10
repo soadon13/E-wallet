@@ -1,0 +1,97 @@
+# Backend Blueprint for Nigeria Mobile eWallet (Flask + PostgreSQL)
+
+from flask import Flask, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime, timedelta
+import random, string
+
+app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///ewallet.db'  # Use PostgreSQL in prod
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# --- Initialize DB ---
+db = SQLAlchemy(app)
+
+# --- Models ---
+class Wallet(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    phone_number = db.Column(db.String(15), unique=True, nullable=False)
+    pin = db.Column(db.String(4), nullable=False)
+    balance = db.Column(db.Float, default=0.0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class OTP(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    phone_number = db.Column(db.String(15), nullable=False)
+    code = db.Column(db.String(6), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+
+# --- Routes ---
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.json
+    phone = data.get('phone_number')
+    pin = data.get('pin')
+
+    if Wallet.query.filter_by(phone_number=phone).first():
+        return jsonify({'status': 'error', 'message': 'Wallet already exists'}), 400
+
+    wallet = Wallet(phone_number=phone, pin=pin)
+    db.session.add(wallet)
+    db.session.commit()
+    return jsonify({'status': 'success', 'message': 'Wallet created'})
+
+@app.route('/balance/<phone>', methods=['GET'])
+def get_balance(phone):
+    wallet = Wallet.query.filter_by(phone_number=phone).first()
+    if not wallet:
+        return jsonify({'status': 'error', 'message': 'Wallet not found'}), 404
+    return jsonify({'status': 'success', 'balance': wallet.balance})
+
+@app.route('/send-money', methods=['POST'])
+def send_money():
+    data = request.json
+    sender = Wallet.query.filter_by(phone_number=data['sender']).first()
+    recipient = Wallet.query.filter_by(phone_number=data['recipient']).first()
+    amount = float(data['amount'])
+
+    if not sender or not recipient:
+        return jsonify({'status': 'error', 'message': 'Wallet not found'}), 404
+    if sender.balance < amount:
+        return jsonify({'status': 'error', 'message': 'Insufficient funds'}), 400
+
+    sender.balance -= amount
+    recipient.balance += amount
+    db.session.commit()
+    return jsonify({'status': 'success', 'message': 'Transfer complete'})
+
+@app.route('/request-otp/<phone>', methods=['GET'])
+def request_otp(phone):
+    code = ''.join(random.choices(string.digits, k=6))
+    expires = datetime.utcnow() + timedelta(minutes=10)
+    otp = OTP(phone_number=phone, code=code, expires_at=expires)
+    db.session.add(otp)
+    db.session.commit()
+    return jsonify({'status': 'success', 'otp': code, 'expires_at': expires.isoformat()})
+
+@app.route('/withdraw', methods=['POST'])
+def withdraw():
+    data = request.json
+    otp_entry = OTP.query.filter_by(phone_number=data['phone_number'], code=data['otp']).first()
+    if not otp_entry or datetime.utcnow() > otp_entry.expires_at:
+        return jsonify({'status': 'error', 'message': 'Invalid or expired OTP'}), 400
+
+    wallet = Wallet.query.filter_by(phone_number=data['phone_number']).first()
+    amount = float(data['amount'])
+    if wallet.balance < amount:
+        return jsonify({'status': 'error', 'message': 'Insufficient funds'}), 400
+
+    wallet.balance -= amount
+    db.session.delete(otp_entry)
+    db.session.commit()
+    return jsonify({'status': 'success', 'message': f'₦{amount} withdrawn successfully'})
+
+# --- Run Server ---
+if __name__ == '__main__':
+    db.create_all()
+    app.run(debug=True)
